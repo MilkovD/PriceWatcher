@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Cronos" />
+    <PackageReference Include="Telegram.Bot" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PriceWatcher.Domain\PriceWatcher.Domain.csproj" />
+    <ProjectReference Include="..\PriceWatcher.Infrastructure\PriceWatcher.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

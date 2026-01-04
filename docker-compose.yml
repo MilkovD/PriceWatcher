@@ -1,0 +1,37 @@
+services:
+  pricewatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - DB_PATH=/data/pricewatcher.db
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}
+      - CHECK_CRON=0 8,20 * * *
+      - CHECK_TIMEZONE=Europe/Vilnius
+      - MAX_PARALLEL=5
+      - HOST_MIN_DELAY_MS=2000
+      - HOST_JITTER_MS=500
+      - RETENTION_DAYS=180
+      - CLEANUP_INTERVAL_HOURS=24
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://aspire-dashboard:18889
+      - OTEL_SERVICE_NAME=PriceWatcher
+    volumes:
+      - pricewatcher-data:/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      - aspire-dashboard
+    restart: unless-stopped
+
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:9.0
+    environment:
+      - DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true
+    ports:
+      - "18888:18888"  # Dashboard UI
+      - "18889:18889"  # OTLP gRPC endpoint
+    restart: unless-stopped
+
+volumes:
+  pricewatcher-data:

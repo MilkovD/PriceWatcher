@@ -1,0 +1,35 @@
+{
+  "name": "PriceWatcher Dev",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:1-10.0-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csharp",
+        "ms-dotnettools.csdevkit",
+        "ms-azuretools.vscode-docker",
+        "editorconfig.editorconfig"
+      ],
+      "settings": {
+        "dotnet.defaultSolution": "PriceWatcher.sln"
+      }
+    }
+  },
+  "postCreateCommand": "dotnet restore && pwsh -Command \"& { $ErrorActionPreference='SilentlyContinue'; dotnet tool install --global Microsoft.Playwright.CLI; playwright install chromium } \"",
+  "remoteUser": "vscode",
+  "forwardPorts": [8080, 18888],
+  "portsAttributes": {
+    "8080": {
+      "label": "PriceWatcher API"
+    },
+    "18888": {
+      "label": "Aspire Dashboard"
+    }
+  },
+  "remoteEnv": {
+    "TELEGRAM_BOT_TOKEN": "${localEnv:TELEGRAM_BOT_TOKEN}",
+    "ADMIN_TELEGRAM_IDS": "${localEnv:ADMIN_TELEGRAM_IDS}"
+  }
+}
