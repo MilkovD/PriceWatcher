@@ -4,7 +4,22 @@ using PriceWatcher.Infrastructure.Data;
 using PriceWatcher.Infrastructure.Extensions;
 using PriceWatcher.Worker.Extensions;
 
+// Load .env file from solution root
+var envPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".env");
+if (File.Exists(envPath))
+{
+    DotNetEnv.Env.Load(envPath);
+}
+else
+{
+    // Try current directory (for Docker/production)
+    DotNetEnv.Env.Load();
+}
+
 var builder = WebApplication.CreateBuilder(args);
+
+// Add environment variables to configuration
+builder.Configuration.AddEnvironmentVariables();
 
 // Aspire ServiceDefaults (OpenTelemetry, Health Checks, Resilience)
 builder.AddServiceDefaults();
