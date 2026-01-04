@@ -24,12 +24,12 @@ builder.Configuration.AddEnvironmentVariables();
 // Aspire ServiceDefaults (OpenTelemetry, Health Checks, Resilience)
 builder.AddServiceDefaults();
 
-// Database
+// Database - use pooled factory which also registers scoped DbContext
 var dbPath = builder.Configuration["DB_PATH"] ?? "pricewatcher.db";
-builder.Services.AddDbContext<PriceWatcherDbContext>(options =>
+builder.Services.AddPooledDbContextFactory<PriceWatcherDbContext>(options =>
     options.UseSqlite($"Data Source={dbPath}"));
-builder.Services.AddDbContextFactory<PriceWatcherDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}"));
+builder.Services.AddScoped(sp =>
+    sp.GetRequiredService<IDbContextFactory<PriceWatcherDbContext>>().CreateDbContext());
 
 // Product Sources
 builder.Services.AddProductSources();

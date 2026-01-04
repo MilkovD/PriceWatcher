@@ -17,7 +17,8 @@
       "Bash(git -C C:/milkov/code/PriceWatcher push)",
       "Bash(dotnet sln:*)",
       "Bash(dotnet restore:*)",
-      "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nFix .env file loading for bot token configuration\n\n- Add DotNetEnv package to load .env files\n- Load .env from solution root in both App and AppHost\n- Use Environment.GetEnvironmentVariable in AppHost for env vars\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nFix .env file loading for bot token configuration\n\n- Add DotNetEnv package to load .env files\n- Load .env from solution root in both App and AppHost\n- Use Environment.GetEnvironmentVariable in AppHost for env vars\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nFix DbContext lifetime conflict with pooled factory\n\nUse AddPooledDbContextFactory + scoped DbContext registration\nto avoid singleton/scoped service lifetime mismatch.\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   }
 }
