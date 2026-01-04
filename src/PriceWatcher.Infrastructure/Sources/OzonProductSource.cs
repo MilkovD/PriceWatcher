@@ -1,25 +1,59 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
-using Microsoft.Playwright;
 using PriceWatcher.Domain.Interfaces;
 using PriceWatcher.Domain.Models;
 using PriceWatcher.Infrastructure.Parsing;
 
 namespace PriceWatcher.Infrastructure.Sources;
 
-public partial class OzonProductSource : IProductSource, IAsyncDisposable
+public partial class OzonProductSource : IProductSource
 {
     private readonly ILogger<OzonProductSource> _logger;
-    private readonly SemaphoreSlim _browserLock = new(1, 1);
-    private IPlaywright? _playwright;
-    private IBrowser? _browser;
-    private IBrowserContext? _context;
-    private bool _disposed;
+    private readonly HttpClient _httpClient;
+
+    private readonly CookieContainer _cookieContainer;
+    private bool _sessionEstablished;
 
     public OzonProductSource(ILogger<OzonProductSource> logger)
     {
         _logger = logger;
+
+        _cookieContainer = new CookieContainer();
+        var handler = new HttpClientHandler
+        {
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+            UseCookies = true,
+            CookieContainer = _cookieContainer,
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 10
+        };
+
+        _httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(30)
+        };
+
+        SetupDefaultHeaders();
+    }
+
+    private void SetupDefaultHeaders()
+    {
+        _httpClient.DefaultRequestHeaders.Clear();
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+        _httpClient.DefaultRequestHeaders.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+        _httpClient.DefaultRequestHeaders.Add("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
+        _httpClient.DefaultRequestHeaders.Add("Cache-Control", "max-age=0");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Ch-Ua-Mobile", "?0");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Ch-Ua-Platform", "\"Windows\"");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Dest", "document");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Mode", "navigate");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+        _httpClient.DefaultRequestHeaders.Add("Sec-Fetch-User", "?1");
+        _httpClient.DefaultRequestHeaders.Add("Upgrade-Insecure-Requests", "1");
+        _httpClient.DefaultRequestHeaders.Add("Dnt", "1");
     }
 
     public string SourceKey => "ozon";
@@ -35,29 +69,51 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
 
     public async Task<ProductSnapshot> FetchAsync(string url, CancellationToken ct = default)
     {
-        var context = await EnsureBrowserAsync();
-        var page = await context.NewPageAsync();
+        _logger.LogDebug("Fetching Ozon product: {Url}", url);
 
         try
         {
-            _logger.LogDebug("Fetching Ozon product: {Url}", url);
+            // Establish session first if needed
+            await EnsureSessionAsync(ct);
 
-            await page.GotoAsync(url, new PageGotoOptions
+            // Create request with Referer header
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("Referer", "https://www.ozon.ru/");
+
+            var response = await _httpClient.SendAsync(request, ct);
+
+            if (!response.IsSuccessStatusCode)
             {
-                WaitUntil = WaitUntilState.DOMContentLoaded,
-                Timeout = 60000
-            });
+                _logger.LogWarning("HTTP {StatusCode} for URL: {Url}", response.StatusCode, url);
 
-            // Wait for antibot challenge to complete (if any)
-            await WaitForAntibotAsync(page);
+                // Try one more time after re-establishing session
+                if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    _sessionEstablished = false;
+                    await EnsureSessionAsync(ct);
 
-            var html = await page.ContentAsync();
+                    using var retryRequest = new HttpRequestMessage(HttpMethod.Get, url);
+                    retryRequest.Headers.Add("Referer", "https://www.ozon.ru/");
+                    response = await _httpClient.SendAsync(retryRequest, ct);
+                }
+
+                response.EnsureSuccessStatusCode();
+            }
+
+            var html = await response.Content.ReadAsStringAsync(ct);
+
+            // Check if we got blocked
+            if (html.Contains("Доступ ограничен") || html.Contains("доступ к запрашиваемому ресурсу ограничен"))
+            {
+                _logger.LogWarning("Access blocked by Ozon for URL: {Url}", url);
+                throw new InvalidOperationException("Access blocked by Ozon antibot protection");
+            }
 
             // Extract title
-            var title = await ExtractTitleAsync(page);
+            var title = ExtractTitle(html);
 
             // Extract price using multiple strategies
-            var (priceMinor, rawText) = await ExtractPriceAsync(page, html);
+            var priceMinor = ExtractPrice(html);
 
             var availability = priceMinor.HasValue ? Availability.InStock : Availability.Unknown;
 
@@ -74,369 +130,227 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
                 CapturedAt: DateTimeOffset.UtcNow
             );
         }
-        catch (Exception ex)
+        catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "Error fetching Ozon product: {Url}", url);
+            _logger.LogError(ex, "HTTP error fetching Ozon product: {Url}", url);
             throw;
         }
-        finally
-        {
-            await page.CloseAsync();
-        }
     }
 
-    private async Task WaitForAntibotAsync(IPage page)
+    private async Task EnsureSessionAsync(CancellationToken ct)
     {
-        const int maxWaitMs = 30000;
-        const int checkIntervalMs = 500;
-        var elapsed = 0;
+        if (_sessionEstablished)
+            return;
 
-        while (elapsed < maxWaitMs)
+        _logger.LogDebug("Establishing session with Ozon...");
+
+        try
         {
-            // Check if we're on an antibot/challenge page
-            var isChallenge = await page.EvaluateAsync<bool>("""
-                () => {
-                    const title = document.title?.toLowerCase() || '';
-                    const body = document.body?.textContent?.toLowerCase() || '';
+            // Visit main page to get cookies
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.ozon.ru/");
+            request.Headers.Add("Sec-Fetch-Site", "none");
 
-                    // Check for common antibot indicators
-                    if (title.includes('challenge') ||
-                        title.includes('antibot') ||
-                        title.includes('captcha') ||
-                        title.includes('проверка') ||
-                        title.includes('подождите')) {
-                        return true;
-                    }
+            var response = await _httpClient.SendAsync(request, ct);
 
-                    // Check for challenge page content
-                    if (body.includes('checking your browser') ||
-                        body.includes('please wait') ||
-                        body.includes('проверяем') ||
-                        body.includes('подождите')) {
-                        return true;
-                    }
-
-                    // Check if page has minimal content (likely loading/challenge)
-                    const hasProduct = document.querySelector('[data-widget="webPrice"]') ||
-                                      document.querySelector('[data-widget="webProductHeading"]') ||
-                                      document.querySelector('meta[property="og:title"]')?.content?.length > 10;
-
-                    return !hasProduct && body.length < 5000;
-                }
-            """);
-
-            if (!isChallenge)
+            if (response.IsSuccessStatusCode)
             {
-                _logger.LogDebug("Antibot check passed after {Elapsed}ms", elapsed);
-                // Additional wait for dynamic content
-                await page.WaitForTimeoutAsync(Random.Shared.Next(1000, 2000));
-                return;
+                _sessionEstablished = true;
+                _logger.LogDebug("Session established, cookies: {Count}", _cookieContainer.Count);
+
+                // Small delay to appear more human
+                await Task.Delay(Random.Shared.Next(500, 1500), ct);
             }
-
-            _logger.LogDebug("Waiting for antibot challenge... ({Elapsed}ms)", elapsed);
-            await page.WaitForTimeoutAsync(checkIntervalMs);
-            elapsed += checkIntervalMs;
         }
-
-        _logger.LogWarning("Antibot wait timeout exceeded, proceeding anyway");
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to establish session, continuing anyway");
+        }
     }
 
-    private async Task<string> ExtractTitleAsync(IPage page)
+    private string ExtractTitle(string html)
     {
         // Try og:title first
-        var ogTitle = await page.EvaluateAsync<string?>(
-            "() => document.querySelector('meta[property=\"og:title\"]')?.content");
-
-        if (!string.IsNullOrWhiteSpace(ogTitle))
-            return ogTitle.Trim();
-
-        // Fallback to document.title
-        var docTitle = await page.TitleAsync();
-        if (!string.IsNullOrWhiteSpace(docTitle))
+        var ogTitleMatch = OgTitleRegex().Match(html);
+        if (ogTitleMatch.Success)
         {
-            // Remove common suffixes like " - купить в интернет-магазине OZON"
-            var cleanTitle = OzonTitleSuffixRegex().Replace(docTitle, "").Trim();
-            return cleanTitle;
+            var title = System.Web.HttpUtility.HtmlDecode(ogTitleMatch.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(title))
+                return title.Trim();
+        }
+
+        // Try <title> tag
+        var titleMatch = TitleTagRegex().Match(html);
+        if (titleMatch.Success)
+        {
+            var title = System.Web.HttpUtility.HtmlDecode(titleMatch.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                // Remove common suffixes
+                var cleanTitle = OzonTitleSuffixRegex().Replace(title, "").Trim();
+                return cleanTitle;
+            }
         }
 
         return "Неизвестный товар";
     }
 
-    private async Task<(long? PriceMinor, string? RawText)> ExtractPriceAsync(IPage page, string html)
+    private long? ExtractPrice(string html)
     {
-        // Strategy 1: Try to extract from JSON state
-        var jsonPrice = await TryExtractFromJsonStateAsync(page, html);
-        if (jsonPrice.HasValue)
-        {
-            _logger.LogDebug("Price extracted from JSON state: {Price}", jsonPrice.Value);
-            return (jsonPrice.Value, null);
-        }
-
-        // Strategy 2: Try JSON-LD structured data
-        var jsonLdPrice = await TryExtractFromJsonLdAsync(page);
+        // Strategy 1: Try JSON-LD structured data
+        var jsonLdPrice = TryExtractFromJsonLd(html);
         if (jsonLdPrice.HasValue)
         {
             _logger.LogDebug("Price extracted from JSON-LD: {Price}", jsonLdPrice.Value);
-            return (jsonLdPrice.Value, null);
+            return jsonLdPrice.Value;
         }
 
-        // Strategy 3: Try meta tags
-        var metaPrice = await TryExtractFromMetaAsync(page);
+        // Strategy 2: Try meta tag
+        var metaPrice = TryExtractFromMeta(html);
         if (metaPrice.HasValue)
         {
-            _logger.LogDebug("Price extracted from meta tags: {Price}", metaPrice.Value);
-            return (metaPrice.Value, null);
+            _logger.LogDebug("Price extracted from meta: {Price}", metaPrice.Value);
+            return metaPrice.Value;
         }
 
-        // Strategy 4: Try DOM selectors
-        var (domPrice, rawText) = await TryExtractFromDomAsync(page);
-        if (domPrice.HasValue)
+        // Strategy 3: Try to find price in page state JSON
+        var statePrice = TryExtractFromState(html);
+        if (statePrice.HasValue)
         {
-            _logger.LogDebug("Price extracted from DOM: {Price} (raw: {RawText})", domPrice.Value, rawText);
-            return (domPrice.Value, rawText);
+            _logger.LogDebug("Price extracted from state: {Price}", statePrice.Value);
+            return statePrice.Value;
+        }
+
+        // Strategy 4: Try regex pattern for price
+        var regexPrice = TryExtractFromRegex(html);
+        if (regexPrice.HasValue)
+        {
+            _logger.LogDebug("Price extracted from regex: {Price}", regexPrice.Value);
+            return regexPrice.Value;
         }
 
         _logger.LogWarning("Could not extract price from page");
-        return (null, null);
+        return null;
     }
 
-    private async Task<long?> TryExtractFromJsonStateAsync(IPage page, string html)
+    private long? TryExtractFromJsonLd(string html)
     {
         try
         {
-            // Look for __NUXT_DATA__ or similar state objects
-            var stateMatch = OzonStateRegex().Match(html);
-            if (stateMatch.Success)
+            var jsonLdMatches = JsonLdRegex().Matches(html);
+            foreach (Match match in jsonLdMatches)
             {
-                var jsonStr = stateMatch.Groups[1].Value;
-                // This is a simplified extraction - real implementation would parse the state properly
-            }
+                var json = match.Groups[1].Value;
+                try
+                {
+                    using var doc = JsonDocument.Parse(json);
+                    var root = doc.RootElement;
 
-            // Try to find price in window.__PRELOADED_STATE__ or similar
-            var price = await page.EvaluateAsync<long?>("""
-                () => {
-                    try {
-                        // Try various state objects
-                        const state = window.__NUXT_DATA__ || window.__PRELOADED_STATE__ || window.__INITIAL_STATE__;
-                        if (state) {
-                            const json = JSON.stringify(state);
-                            const match = json.match(/"price"[:\s]*(\d+)/);
-                            if (match) return parseInt(match[1]) * 100;
+                    if (root.TryGetProperty("@type", out var typeEl) &&
+                        typeEl.GetString() == "Product" &&
+                        root.TryGetProperty("offers", out var offersEl))
+                    {
+                        JsonElement offer;
+                        if (offersEl.ValueKind == JsonValueKind.Array)
+                            offer = offersEl[0];
+                        else
+                            offer = offersEl;
+
+                        if (offer.TryGetProperty("price", out var priceEl))
+                        {
+                            var priceStr = priceEl.ValueKind == JsonValueKind.Number
+                                ? priceEl.GetDecimal().ToString()
+                                : priceEl.GetString();
+                            return PriceParser.ParseToMinor(priceStr);
                         }
-                    } catch {}
-                    return null;
-                }
-            """);
-
-            return price;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private async Task<long?> TryExtractFromJsonLdAsync(IPage page)
-    {
-        try
-        {
-            var price = await page.EvaluateAsync<string?>("""
-                () => {
-                    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-                    for (const script of scripts) {
-                        try {
-                            const data = JSON.parse(script.textContent);
-                            if (data['@type'] === 'Product' && data.offers) {
-                                const offers = Array.isArray(data.offers) ? data.offers[0] : data.offers;
-                                if (offers.price) return offers.price.toString();
-                            }
-                        } catch {}
                     }
-                    return null;
                 }
-            """);
-
-            return PriceParser.ParseToMinor(price);
+                catch
+                {
+                    // Try next JSON-LD block
+                }
+            }
         }
         catch
         {
-            return null;
+            // Ignore
         }
+        return null;
     }
 
-    private async Task<long?> TryExtractFromMetaAsync(IPage page)
+    private long? TryExtractFromMeta(string html)
+    {
+        var metaMatch = MetaPriceRegex().Match(html);
+        if (metaMatch.Success)
+        {
+            return PriceParser.ParseToMinor(metaMatch.Groups[1].Value);
+        }
+        return null;
+    }
+
+    private long? TryExtractFromState(string html)
     {
         try
         {
-            var price = await page.EvaluateAsync<string?>("""
-                () => {
-                    const meta = document.querySelector('meta[property="product:price:amount"]') ||
-                                 document.querySelector('meta[itemprop="price"]') ||
-                                 document.querySelector('meta[name="price"]');
-                    return meta?.content;
-                }
-            """);
-
-            return PriceParser.ParseToMinor(price);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private async Task<(long? Price, string? RawText)> TryExtractFromDomAsync(IPage page)
-    {
-        try
-        {
-            // Try various price selectors commonly used on Ozon
-            var priceSelectors = new[]
+            // Look for price in various state patterns
+            var pricePatterns = new[]
             {
-                "[data-widget='webPrice'] span:first-child",
-                "[data-widget='webSale'] span:first-child",
-                ".price-number",
-                "[class*='price'] span",
-                "[class*='Price'] span",
-                "[data-testid='price']",
+                PriceInStateRegex1(),
+                PriceInStateRegex2(),
+                PriceInStateRegex3()
             };
 
-            foreach (var selector in priceSelectors)
+            foreach (var pattern in pricePatterns)
             {
-                var priceText = await page.EvaluateAsync<string?>(
-                    "() => { const el = document.querySelector('" + selector + "'); return el?.textContent?.trim(); }");
-
-                if (!string.IsNullOrWhiteSpace(priceText))
+                var match = pattern.Match(html);
+                if (match.Success)
                 {
-                    var parsed = PriceParser.ParseToMinor(priceText);
-                    if (parsed.HasValue)
-                        return (parsed, priceText);
+                    var priceStr = match.Groups[1].Value;
+                    return PriceParser.ParseToMinor(priceStr);
                 }
             }
-
-            // Fallback: try to find any element with price-like content
-            var genericPrice = await page.EvaluateAsync<string?>("""
-                () => {
-                    const elements = document.body.querySelectorAll('*');
-                    for (const el of elements) {
-                        if (el.children.length === 0) {
-                            const text = el.textContent?.trim();
-                            if (text && /^\d[\d\s]*₽$/.test(text)) {
-                                return text;
-                            }
-                        }
-                    }
-                    return null;
-                }
-            """);
-
-            if (!string.IsNullOrWhiteSpace(genericPrice))
-            {
-                var parsed = PriceParser.ParseToMinor(genericPrice);
-                if (parsed.HasValue)
-                    return (parsed, genericPrice);
-            }
-
-            return (null, null);
         }
         catch
         {
-            return (null, null);
+            // Ignore
         }
+        return null;
     }
 
-    private async Task<IBrowserContext> EnsureBrowserAsync()
+    private long? TryExtractFromRegex(string html)
     {
-        if (_context is not null)
-            return _context;
-
-        await _browserLock.WaitAsync();
-        try
+        // Look for price patterns like "1 234 ₽" or "1234₽"
+        var priceMatch = PriceDisplayRegex().Match(html);
+        if (priceMatch.Success)
         {
-            if (_context is not null)
-                return _context;
-
-            _playwright = await Playwright.CreateAsync();
-            _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-            {
-                Headless = true,
-                Args = [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process"
-                ]
-            });
-
-            _context = await _browser.NewContextAsync(new BrowserNewContextOptions
-            {
-                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                Locale = "ru-RU",
-                TimezoneId = "Europe/Moscow",
-                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-                JavaScriptEnabled = true,
-                IgnoreHTTPSErrors = true,
-                ExtraHTTPHeaders = new Dictionary<string, string>
-                {
-                    ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    ["Accept-Language"] = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                    ["Accept-Encoding"] = "gzip, deflate, br",
-                    ["Connection"] = "keep-alive",
-                    ["Upgrade-Insecure-Requests"] = "1",
-                    ["Sec-Fetch-Dest"] = "document",
-                    ["Sec-Fetch-Mode"] = "navigate",
-                    ["Sec-Fetch-Site"] = "none",
-                    ["Sec-Fetch-User"] = "?1"
-                }
-            });
-
-            // Add stealth scripts to hide automation
-            await _context.AddInitScriptAsync("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
-                window.chrome = { runtime: {} };
-            """);
-
-            return _context;
+            return PriceParser.ParseToMinor(priceMatch.Groups[0].Value);
         }
-        finally
-        {
-            _browserLock.Release();
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_disposed)
-            return;
-
-        _disposed = true;
-
-        if (_context is not null)
-        {
-            await _context.CloseAsync();
-            _context = null;
-        }
-
-        if (_browser is not null)
-        {
-            await _browser.CloseAsync();
-            _browser = null;
-        }
-
-        _playwright?.Dispose();
-        _playwright = null;
-
-        _browserLock.Dispose();
-
-        GC.SuppressFinalize(this);
+        return null;
     }
 
     [GeneratedRegex(@"\s*[-–—|]\s*(купить|OZON|Озон|интернет-магазин).*$", RegexOptions.IgnoreCase)]
     private static partial Regex OzonTitleSuffixRegex();
 
-    [GeneratedRegex(@"__NUXT_DATA__\s*=\s*(\[[\s\S]*?\]);")]
-    private static partial Regex OzonStateRegex();
+    [GeneratedRegex(@"<meta[^>]+property=""og:title""[^>]+content=""([^""]+)""", RegexOptions.IgnoreCase)]
+    private static partial Regex OgTitleRegex();
+
+    [GeneratedRegex(@"<title[^>]*>([^<]+)</title>", RegexOptions.IgnoreCase)]
+    private static partial Regex TitleTagRegex();
+
+    [GeneratedRegex(@"<script[^>]+type=""application/ld\+json""[^>]*>([\s\S]*?)</script>", RegexOptions.IgnoreCase)]
+    private static partial Regex JsonLdRegex();
+
+    [GeneratedRegex(@"<meta[^>]+(?:property=""product:price:amount""|itemprop=""price""|name=""price"")[^>]+content=""([^""]+)""", RegexOptions.IgnoreCase)]
+    private static partial Regex MetaPriceRegex();
+
+    [GeneratedRegex(@"""price""\s*:\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex PriceInStateRegex1();
+
+    [GeneratedRegex(@"""cardPrice""\s*:\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex PriceInStateRegex2();
+
+    [GeneratedRegex(@"""finalPrice""\s*:\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex PriceInStateRegex3();
+
+    [GeneratedRegex(@"\d[\d\s]*\s*₽")]
+    private static partial Regex PriceDisplayRegex();
 }

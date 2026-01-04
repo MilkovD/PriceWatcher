@@ -1,4 +1,5 @@
 using PriceWatcher.Domain.Interfaces;
+using static System.Web.HttpUtility;
 
 namespace PriceWatcher.Infrastructure.Sources;
 
@@ -22,7 +23,7 @@ public class ProductSourceResolver(IEnumerable<IProductSource> sources) : IProdu
         };
 
         // Remove common tracking parameters
-        var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+        var query = ParseQueryString(uri.Query);
         var keysToRemove = query.AllKeys
             .Where(k => k != null && (
                 k.StartsWith("utm_", StringComparison.OrdinalIgnoreCase) ||
