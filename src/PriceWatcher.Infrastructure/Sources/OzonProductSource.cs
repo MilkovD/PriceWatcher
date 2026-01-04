@@ -14,6 +14,7 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
     private readonly SemaphoreSlim _browserLock = new(1, 1);
     private IPlaywright? _playwright;
     private IBrowser? _browser;
+    private IBrowserContext? _context;
     private bool _disposed;
 
     public OzonProductSource(ILogger<OzonProductSource> logger)
@@ -34,8 +35,8 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
 
     public async Task<ProductSnapshot> FetchAsync(string url, CancellationToken ct = default)
     {
-        var browser = await EnsureBrowserAsync();
-        var page = await browser.NewPageAsync();
+        var context = await EnsureBrowserAsync();
+        var page = await context.NewPageAsync();
 
         try
         {
@@ -44,11 +45,11 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
             await page.GotoAsync(url, new PageGotoOptions
             {
                 WaitUntil = WaitUntilState.DOMContentLoaded,
-                Timeout = 30000
+                Timeout = 60000
             });
 
-            // Wait a bit for dynamic content
-            await page.WaitForTimeoutAsync(Random.Shared.Next(800, 1500));
+            // Wait for antibot challenge to complete (if any)
+            await WaitForAntibotAsync(page);
 
             var html = await page.ContentAsync();
 
@@ -82,6 +83,62 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
         {
             await page.CloseAsync();
         }
+    }
+
+    private async Task WaitForAntibotAsync(IPage page)
+    {
+        const int maxWaitMs = 30000;
+        const int checkIntervalMs = 500;
+        var elapsed = 0;
+
+        while (elapsed < maxWaitMs)
+        {
+            // Check if we're on an antibot/challenge page
+            var isChallenge = await page.EvaluateAsync<bool>("""
+                () => {
+                    const title = document.title?.toLowerCase() || '';
+                    const body = document.body?.textContent?.toLowerCase() || '';
+
+                    // Check for common antibot indicators
+                    if (title.includes('challenge') ||
+                        title.includes('antibot') ||
+                        title.includes('captcha') ||
+                        title.includes('проверка') ||
+                        title.includes('подождите')) {
+                        return true;
+                    }
+
+                    // Check for challenge page content
+                    if (body.includes('checking your browser') ||
+                        body.includes('please wait') ||
+                        body.includes('проверяем') ||
+                        body.includes('подождите')) {
+                        return true;
+                    }
+
+                    // Check if page has minimal content (likely loading/challenge)
+                    const hasProduct = document.querySelector('[data-widget="webPrice"]') ||
+                                      document.querySelector('[data-widget="webProductHeading"]') ||
+                                      document.querySelector('meta[property="og:title"]')?.content?.length > 10;
+
+                    return !hasProduct && body.length < 5000;
+                }
+            """);
+
+            if (!isChallenge)
+            {
+                _logger.LogDebug("Antibot check passed after {Elapsed}ms", elapsed);
+                // Additional wait for dynamic content
+                await page.WaitForTimeoutAsync(Random.Shared.Next(1000, 2000));
+                return;
+            }
+
+            _logger.LogDebug("Waiting for antibot challenge... ({Elapsed}ms)", elapsed);
+            await page.WaitForTimeoutAsync(checkIntervalMs);
+            elapsed += checkIntervalMs;
+        }
+
+        _logger.LogWarning("Antibot wait timeout exceeded, proceeding anyway");
     }
 
     private async Task<string> ExtractTitleAsync(IPage page)
@@ -287,34 +344,62 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
         }
     }
 
-    private async Task<IBrowser> EnsureBrowserAsync()
+    private async Task<IBrowserContext> EnsureBrowserAsync()
     {
-        if (_browser is not null)
-            return _browser;
+        if (_context is not null)
+            return _context;
 
         await _browserLock.WaitAsync();
         try
         {
-            if (_browser is not null)
-                return _browser;
+            if (_context is not null)
+                return _context;
 
             _playwright = await Playwright.CreateAsync();
             _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
                 Headless = true,
-                Args = ["--disable-blink-features=AutomationControlled"]
+                Args = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process"
+                ]
             });
 
-            var context = await _browser.NewContextAsync(new BrowserNewContextOptions
+            _context = await _browser.NewContextAsync(new BrowserNewContextOptions
             {
-                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 Locale = "ru-RU",
-                TimezoneId = "Europe/Vilnius",
-                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 }
+                TimezoneId = "Europe/Moscow",
+                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+                JavaScriptEnabled = true,
+                IgnoreHTTPSErrors = true,
+                ExtraHTTPHeaders = new Dictionary<string, string>
+                {
+                    ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    ["Accept-Language"] = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                    ["Accept-Encoding"] = "gzip, deflate, br",
+                    ["Connection"] = "keep-alive",
+                    ["Upgrade-Insecure-Requests"] = "1",
+                    ["Sec-Fetch-Dest"] = "document",
+                    ["Sec-Fetch-Mode"] = "navigate",
+                    ["Sec-Fetch-Site"] = "none",
+                    ["Sec-Fetch-User"] = "?1"
+                }
             });
 
-            // Return the default context's browser
-            return _browser;
+            // Add stealth scripts to hide automation
+            await _context.AddInitScriptAsync("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
+                window.chrome = { runtime: {} };
+            """);
+
+            return _context;
         }
         finally
         {
@@ -328,6 +413,12 @@ public partial class OzonProductSource : IProductSource, IAsyncDisposable
             return;
 
         _disposed = true;
+
+        if (_context is not null)
+        {
+            await _context.CloseAsync();
+            _context = null;
+        }
 
         if (_browser is not null)
         {

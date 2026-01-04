@@ -230,9 +230,10 @@ public class UpdateHandler(
 
     private async Task HandleListAsync(ITelegramBotClient bot, long chatId, Infrastructure.Data.Entities.User user, CancellationToken ct)
     {
+        // SQLite doesn't support DateTimeOffset in ORDER BY, so we order by Id (newer items have higher ids)
         var items = await db.TrackedItems
             .Where(i => i.UserId == user.Id)
-            .OrderByDescending(i => i.CreatedAt)
+            .OrderByDescending(i => i.Id)
             .Take(50)
             .ToListAsync(ct);
 
