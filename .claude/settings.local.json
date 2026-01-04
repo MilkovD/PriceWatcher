@@ -10,7 +10,11 @@
       "Bash(git -C C:/milkov/code/PriceWatcher status)",
       "Bash(git -C C:/milkov/code/PriceWatcher log --oneline -3)",
       "Bash(git -C C:/milkov/code/PriceWatcher add -A)",
-      "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nInitial commit: PriceWatcher price tracking bot\n\nFeatures:\n- Telegram bot with /start, /add, /list commands\n- Ozon price parser using Playwright\n- Scheduled price checks \\(cron 2x/day\\)\n- Price change notifications\n- Price history charts \\(ScottPlot\\)\n- 6-month data retention\n- OpenTelemetry observability\n- Docker + Aspire Dashboard support\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nInitial commit: PriceWatcher price tracking bot\n\nFeatures:\n- Telegram bot with /start, /add, /list commands\n- Ozon price parser using Playwright\n- Scheduled price checks \\(cron 2x/day\\)\n- Price change notifications\n- Price history charts \\(ScottPlot\\)\n- 6-month data retention\n- OpenTelemetry observability\n- Docker + Aspire Dashboard support\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C C:/milkov/code/PriceWatcher remote add:*)",
+      "Bash(git -C C:/milkov/code/PriceWatcher push -u origin master)",
+      "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nAdd GitHub Actions workflow for Docker image publishing\n\nTriggers on tags matching v* pattern \\(e.g., v0.0.1\\).\nBuilds and pushes to ghcr.io with semantic version tags.\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C C:/milkov/code/PriceWatcher push)"
     ]
   }
 }
