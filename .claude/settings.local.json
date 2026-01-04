@@ -14,7 +14,9 @@
       "Bash(git -C C:/milkov/code/PriceWatcher remote add:*)",
       "Bash(git -C C:/milkov/code/PriceWatcher push -u origin master)",
       "Bash(git -C C:/milkov/code/PriceWatcher commit -m \"$\\(cat <<''EOF''\nAdd GitHub Actions workflow for Docker image publishing\n\nTriggers on tags matching v* pattern \\(e.g., v0.0.1\\).\nBuilds and pushes to ghcr.io with semantic version tags.\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(git -C C:/milkov/code/PriceWatcher push)"
+      "Bash(git -C C:/milkov/code/PriceWatcher push)",
+      "Bash(dotnet sln:*)",
+      "Bash(dotnet restore:*)"
     ]
   }
 }

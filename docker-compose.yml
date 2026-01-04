@@ -1,3 +1,7 @@
+# Production docker-compose configuration
+# For development, use: dotnet run --project src/PriceWatcher.AppHost
+# The Aspire Dashboard will be automatically available at https://localhost:17171
+
 services:
   pricewatcher:
     build:

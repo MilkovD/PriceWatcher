@@ -67,7 +67,7 @@ docker compose up -d
 
 3. Откройте Aspire Dashboard: http://localhost:18888
 
-### Локально
+### Локально с Aspire (рекомендуется для разработки)
 
 1. Установите .NET 10 SDK
 2. Установите Playwright браузеры:
@@ -77,7 +77,22 @@ dotnet tool install --global Microsoft.Playwright.CLI
 playwright install chromium
 ```
 
-3. Задайте переменные окружения и запустите:
+3. Задайте переменные окружения и запустите через Aspire AppHost:
+
+```bash
+export TELEGRAM_BOT_TOKEN=your_bot_token_here
+dotnet run --project src/PriceWatcher.AppHost
+```
+
+4. Откройте Aspire Dashboard: https://localhost:17171
+
+Aspire Dashboard автоматически показывает:
+- Логи всех сервисов в реальном времени
+- Distributed traces
+- Метрики приложения
+- Состояние здоровья сервисов
+
+### Локально без Aspire
 
 ```bash
 export TELEGRAM_BOT_TOKEN=your_bot_token_here
@@ -96,7 +111,9 @@ src/
 ├── PriceWatcher.Infrastructure/   # EF Core, парсеры, источники данных
 ├── PriceWatcher.Bot/              # Telegram бот
 ├── PriceWatcher.Worker/           # Фоновые задачи (проверки, очистка)
-└── PriceWatcher.App/              # Точка входа
+├── PriceWatcher.App/              # Точка входа (веб-приложение)
+├── PriceWatcher.AppHost/          # Aspire оркестратор (для разработки)
+└── PriceWatcher.ServiceDefaults/  # Общая конфигурация OTEL и Resilience
 tests/
 └── PriceWatcher.Tests/            # Unit-тесты
 ```
